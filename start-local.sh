@@ -1241,8 +1241,10 @@ download_and_extract() {
 # Write Elasticsearch security and cluster config for local no-container use
 configure_elasticsearch_no_container() {
   cat >> elasticsearch/config/elasticsearch.yml <<- EOM
+discovery.type: single-node
 xpack.security.enabled: true
 xpack.security.http.ssl.enabled: false
+xpack.security.transport.ssl.enabled: false
 xpack.license.self_generated.type: trial
 xpack.ml.use_auto_machine_memory_percent: true
 network.host: 127.0.0.1
@@ -1262,8 +1264,7 @@ EOM
 # Start Elasticsearch as a background process; saves PID to elasticsearch.pid
 start_elasticsearch_no_container() {
   echo "- Starting Elasticsearch..."
-  ELASTIC_PASSWORD="$es_password" \
-    nohup ./elasticsearch/bin/elasticsearch > elasticsearch.log 2>&1 &
+  nohup ./elasticsearch/bin/elasticsearch > elasticsearch.log 2>&1 &
   echo $! > elasticsearch.pid
 }
 
@@ -1274,8 +1275,7 @@ wait_for_elasticsearch_no_container() {
   echo "- Waiting for Elasticsearch to be ready"
   echo
   start_time="$(date +%s)"
-  until curl -s -o /dev/null -w '%{http_code}' -u "elastic:${es_password}" \
-      http://localhost:9200 | grep -q '200'; do
+  until curl -s -o /dev/null -w '%{http_code}' http://localhost:9200 2>/dev/null | grep -q '401'; do
     elapsed_time="$(($(date +%s) - start_time))"
     if [ "$elapsed_time" -ge "$timeout" ]; then
       echo "Error: Elasticsearch timeout of ${timeout} sec"
@@ -1285,6 +1285,20 @@ wait_for_elasticsearch_no_container() {
     fi
     sleep 2
   done
+}
+
+# Set the elastic superuser password using elasticsearch-reset-password
+set_elastic_password_no_container() {
+  echo "- Setting elastic user password..."
+  printf '%s\n%s\n' "$es_password" "$es_password" | \
+    ./elasticsearch/bin/elasticsearch-reset-password -u elastic -i -b > /dev/null 2>&1
+  # Verify the password works
+  if ! curl -s -o /dev/null -w '%{http_code}' -u "elastic:${es_password}" \
+      http://localhost:9200 | grep -q '200'; then
+    echo "Error: could not set elastic user password"
+    cleanup_no_container
+    exit 1
+  fi
 }
 
 # Set the kibana_system built-in user password via the ES security API
@@ -1373,8 +1387,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 . ./.env
 
-ELASTIC_PASSWORD="$ES_LOCAL_PASSWORD" \
-  nohup ./elasticsearch/bin/elasticsearch > elasticsearch.log 2>&1 &
+nohup ./elasticsearch/bin/elasticsearch > elasticsearch.log 2>&1 &
 echo $! > elasticsearch.pid
 echo "Elasticsearch started (PID: $(cat elasticsearch.pid))"
 EOM
@@ -1478,6 +1491,7 @@ run_no_container() {
   configure_elasticsearch_no_container
   start_elasticsearch_no_container
   wait_for_elasticsearch_no_container 120
+  set_elastic_password_no_container
 
   if [ "$esonly" = "false" ]; then
     set_kibana_system_password_no_container
