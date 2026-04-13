@@ -574,7 +574,6 @@ create_env_file() {
   cat > .env <<- EOM
 START_LOCAL_VERSION=$version
 ES_LOCAL_VERSION=$es_version
-ES_LOCAL_CONTAINER_NAME=$elasticsearch_container_name
 ES_LOCAL_PASSWORD=$es_password
 ES_LOCAL_PORT=9200
 ES_LOCAL_URL=http://localhost:\${ES_LOCAL_PORT}
@@ -582,21 +581,31 @@ ES_LOCAL_DISK_SPACE_REQUIRED=1gb
 ES_LOCAL_LICENSE_EXPIRE_DATE=$license_expire
 EOM
 
-  if [ "$edot" = "true" ]; then
+  # Container-specific settings (not needed for no-container mode)
+  if [ "${runtime:-docker}" != "no-container" ]; then
     cat >> .env <<- EOM
+ES_LOCAL_CONTAINER_NAME=$elasticsearch_container_name
+EOM
+    if [ "$edot" = "true" ]; then
+      cat >> .env <<- EOM
 ES_LOCAL_JAVA_OPTS="-Xms2g -Xmx2g"
 EDOT_LOCAL_CONTAINER_NAME=$edot_container_name
 EOM
-  else
-    cat >> .env <<- EOM
+    else
+      cat >> .env <<- EOM
 ES_LOCAL_JAVA_OPTS="-Xms128m -Xmx2g"
 EOM
+    fi
   fi
 
   if [ "$esonly" = "false" ]; then
-    cat >> .env <<- EOM
+    if [ "${runtime:-docker}" != "no-container" ]; then
+      cat >> .env <<- EOM
 KIBANA_LOCAL_CONTAINER_NAME=$kibana_container_name
 KIBANA_LOCAL_SETTINGS_CONTAINER_NAME=$kibana_settings_container_name
+EOM
+    fi
+    cat >> .env <<- EOM
 KIBANA_LOCAL_PORT=5601
 KIBANA_LOCAL_PASSWORD=$kibana_password
 KIBANA_ENCRYPTION_KEY=$kibana_encryption_key
