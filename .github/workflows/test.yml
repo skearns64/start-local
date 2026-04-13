@@ -44,6 +44,36 @@ jobs:
       run: |
         ./lib/bashunit test tests/docker/*
 
+  test-no-container:
+    name: "Test on ${{ matrix.os }} (no-container)"
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install bashunit
+      run: |
+        curl -s https://bashunit.typeddevs.com/install.sh | bash
+
+    - name: Remove Docker so no-container mode is testable
+      run: |
+        sudo apt-get remove -y docker docker-engine docker.io containerd runc docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin || true
+        sudo rm -f /usr/local/bin/docker /usr/local/bin/docker-compose
+
+    - name: Run the no-container tests
+      env:
+        SCRIPT_FILE: 'start-local.sh'
+      run: |
+        ./lib/bashunit tests/no-container/*
+
   test-podman:
     name: "Test on ${{ matrix.os }} (Podman)"
     runs-on: ${{ matrix.os }}

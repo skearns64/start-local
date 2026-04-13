@@ -26,6 +26,7 @@ parse_args() {
   #parameters
   esonly=false
   edot=false
+  force_no_container=false
   # Parse the script parameters
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -46,6 +47,11 @@ parse_args() {
 
       --edot)
         edot=true
+        shift
+        ;;
+
+      --no-container)
+        force_no_container=true
         shift
         ;;
 
@@ -258,6 +264,33 @@ check_docker_wsl() {
   fi
 }
 
+# Detect which container runtime to use, or fall back to no-container mode (native binaries).
+# Sets the $runtime variable to: docker, podman, or no-container.
+detect_runtime() {
+  # --no-container flag forces no-container mode, bypassing container detection entirely
+  if [ "${force_no_container:-false}" = "true" ]; then
+    case "$(uname)" in
+      Darwin|Linux) ;;
+      *) echo "Error: --no-container mode is only supported on macOS and Linux."; exit 1 ;;
+    esac
+    runtime="no-container"
+    return
+  fi
+  set +e
+  if docker compose >/dev/null 2>&1 || available "docker-compose"; then
+    runtime="docker"
+  elif available "podman"; then
+    runtime="podman"
+  else
+    runtime="no-container"
+    case "$(uname)" in
+      Darwin|Linux) ;;
+      *) echo "Error: Docker or Podman is required."; exit 1 ;;
+    esac
+  fi
+  set -e
+}
+
 # Revert the status, removing containers, volumes, network and folder
 cleanup() {
   if [ -d "./../$folder_to_clean" ]; then
@@ -417,6 +450,10 @@ check_requirements() {
     echo "You can install it from https://www.gnu.org/software/grep/."
     exit 1
   fi
+  # Skip Docker/Podman checks for no-container mode
+  if [ "${runtime:-docker}" = "no-container" ]; then
+    return
+  fi
   check_docker_wsl
   need_wait_for_kibana=true
   # Check for "docker compose" or "docker-compose"
@@ -522,8 +559,9 @@ choose_es_version() {
     # Get the latest Elasticsearch version
     es_version="$(get_latest_version)"
   fi
-  # Fix for ARM64: add suffix "-arm64"
-  if is_arm64 && [ "${es_version##*-arm64}" = "$es_version" ]; then
+  # Fix for ARM64: add suffix "-arm64" for Docker image tags
+  # Not needed for no-container mode where arch is encoded in the download URL path
+  if [ "${runtime:-docker}" != "no-container" ] && is_arm64 && [ "${es_version##*-arm64}" = "$es_version" ]; then
     es_version="${es_version}-arm64"
   fi
 }
@@ -1093,7 +1131,13 @@ kibana_wait() {
 
 success() {
   echo
-  if  [ "$esonly" = "true" ]; then
+  if [ "${runtime:-docker}" = "no-container" ]; then
+    if [ "$esonly" = "true" ]; then
+      echo "🎉 Congrats, Elasticsearch is installed and running without containers!"
+    else
+      echo "🎉 Congrats, Elasticsearch and Kibana are installed and running without containers!"
+    fi
+  elif [ "$esonly" = "true" ]; then
     echo "🎉 Congrats, Elasticsearch is installed and running in Docker!"
   else
     if [ "$edot" = "true" ]; then
@@ -1126,15 +1170,339 @@ success() {
   echo
 }
 
+# -------------------------------------------------------
+# Native path — no Docker or Podman (macOS and Linux)
+# -------------------------------------------------------
+
+# Return the Elastic artifact platform string (darwin or linux)
+no_container_platform() {
+  case "$(uname)" in
+    Darwin) echo "darwin" ;;
+    Linux)  echo "linux" ;;
+    *) echo "Error: unsupported platform: $(uname)"; exit 1 ;;
+  esac
+}
+
+# Return the Elastic artifact arch suffix for the current machine
+no_container_arch() {
+  case "$(uname -m)" in
+    arm64|aarch64) echo "aarch64" ;;
+    x86_64)        echo "x86_64" ;;
+    *) echo "Error: unsupported architecture: $(uname -m)"; exit 1 ;;
+  esac
+}
+
+# Check that a TCP port is not already in use
+# parameter: port number
+check_port_available() {
+  port=$1
+  in_use=false
+  if available "lsof"; then
+    lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && in_use=true
+  elif available "ss"; then
+    ss -tlnp 2>/dev/null | grep -q ":${port} " && in_use=true
+  fi
+  if [ "$in_use" = "true" ]; then
+    echo "Error: port $port is already in use."
+    echo "Please stop the process using port $port before running start-local."
+    exit 1
+  fi
+}
+
+# Download and extract an Elastic tarball, renaming the extracted dir to $name
+# parameter 1: name (elasticsearch or kibana)
+# parameter 2: download URL
+download_and_extract() {
+  name=$1
+  url=$2
+  echo "- Downloading ${name} (this may take a few minutes)..."
+  curl -# -L --output "${name}.tar.gz" "$url"
+  echo "- Extracting ${name}..."
+  tar -xzf "${name}.tar.gz"
+  rm "${name}.tar.gz"
+  extracted_dir=$(ls -d "${name}"-*/ 2>/dev/null | head -1)
+  if [ -z "$extracted_dir" ]; then
+    echo "Error: could not find extracted directory for ${name}"
+    cleanup_no_container
+    exit 1
+  fi
+  mv "$extracted_dir" "$name"
+}
+
+# Write Elasticsearch security and cluster config for local no-container use
+configure_elasticsearch_no_container() {
+  cat >> elasticsearch/config/elasticsearch.yml <<- EOM
+xpack.security.enabled: true
+xpack.security.http.ssl.enabled: false
+xpack.license.self_generated.type: trial
+xpack.ml.use_auto_machine_memory_percent: true
+network.host: 127.0.0.1
+http.port: 9200
+cluster.routing.allocation.disk.watermark.low: 1gb
+cluster.routing.allocation.disk.watermark.high: 1gb
+cluster.routing.allocation.disk.watermark.flood_stage: 1gb
+EOM
+  mkdir -p elasticsearch/config/jvm.options.d
+  printf -- '-Xms128m\n-Xmx2g\n' > elasticsearch/config/jvm.options.d/heap.options
+  # Fix for JDK AArch64 issue, see https://bugs.openjdk.org/browse/JDK-8345296
+  if is_arm64; then
+    printf -- '-XX:UseSVE=0\n' >> elasticsearch/config/jvm.options.d/heap.options
+  fi
+}
+
+# Start Elasticsearch as a background process; saves PID to elasticsearch.pid
+start_elasticsearch_no_container() {
+  echo "- Starting Elasticsearch..."
+  ELASTIC_PASSWORD="$es_password" \
+    nohup ./elasticsearch/bin/elasticsearch > elasticsearch.log 2>&1 &
+  echo $! > elasticsearch.pid
+}
+
+# Poll until Elasticsearch responds on port 9200 or timeout
+# parameter: timeout in seconds (default 120)
+wait_for_elasticsearch() {
+  timeout="${1:-120}"
+  echo "- Waiting for Elasticsearch to be ready"
+  echo
+  start_time="$(date +%s)"
+  until curl -s -o /dev/null -w '%{http_code}' -u "elastic:${es_password}" \
+      http://localhost:9200 | grep -q '200'; do
+    elapsed_time="$(($(date +%s) - start_time))"
+    if [ "$elapsed_time" -ge "$timeout" ]; then
+      echo "Error: Elasticsearch timeout of ${timeout} sec."
+      echo "Check elasticsearch.log for details."
+      cleanup_no_container
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+# Set the kibana_system built-in user password via the ES security API
+set_kibana_system_password_no_container() {
+  echo "- Setting Kibana system password..."
+  start_time="$(date +%s)"
+  timeout=60
+  until curl -s -u "elastic:${es_password}" -X POST \
+      http://localhost:9200/_security/user/kibana_system/_password \
+      -d "{\"password\":\"${kibana_password}\"}" \
+      -H "Content-Type: application/json" | grep -q "^{}"; do
+    elapsed_time="$(($(date +%s) - start_time))"
+    if [ "$elapsed_time" -ge "$timeout" ]; then
+      echo "Error: could not set kibana_system password (timeout)."
+      cleanup_no_container
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+# Write Kibana config pointing at local Elasticsearch
+configure_kibana_no_container() {
+  cat >> kibana/config/kibana.yml <<- EOM
+server.host: "127.0.0.1"
+server.port: 5601
+elasticsearch.hosts: ["http://localhost:9200"]
+elasticsearch.username: "kibana_system"
+elasticsearch.password: "${kibana_password}"
+xpack.encryptedSavedObjects.encryptionKey: "${kibana_encryption_key}"
+xpack.spaces.defaultSolution: es
+EOM
+}
+
+# Start Kibana as a background process; saves PID to kibana.pid
+start_kibana_no_container() {
+  echo "- Starting Kibana..."
+  nohup ./kibana/bin/kibana > kibana.log 2>&1 &
+  echo $! > kibana.pid
+}
+
+# Poll until Kibana responds with a redirect or timeout
+# parameter: timeout in seconds (default 180)
+wait_for_kibana_no_container() {
+  timeout="${1:-180}"
+  echo "- Waiting for Kibana to be ready"
+  echo
+  start_time="$(date +%s)"
+  until curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'; do
+    elapsed_time="$(($(date +%s) - start_time))"
+    if [ "$elapsed_time" -ge "$timeout" ]; then
+      echo "Error: Kibana timeout of ${timeout} sec."
+      echo "Check kibana.log for details."
+      cleanup_no_container
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+# Stop no-container processes and remove the installation folder on error
+cleanup_no_container() {
+  if [ -f elasticsearch.pid ]; then
+    kill "$(cat elasticsearch.pid)" 2>/dev/null || true
+    rm -f elasticsearch.pid
+  fi
+  if [ -f kibana.pid ]; then
+    kill "$(cat kibana.pid)" 2>/dev/null || true
+    rm -f kibana.pid
+  fi
+  if [ -n "${folder_to_clean:-}" ] && [ -d "./../$folder_to_clean" ]; then
+    cd ..
+    rm -rf "${folder_to_clean}"
+  fi
+}
+
+# Generate start.sh for no-container mode
+create_start_file_no_container() {
+  cat > start.sh <<- 'EOM'
+#!/bin/sh
+# Start script for start-local (no-container mode)
+# More information: https://github.com/elastic/start-local
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}"
+. ./.env
+
+ELASTIC_PASSWORD="$ES_LOCAL_PASSWORD" \
+  nohup ./elasticsearch/bin/elasticsearch > elasticsearch.log 2>&1 &
+echo $! > elasticsearch.pid
+echo "Elasticsearch started (PID: $(cat elasticsearch.pid))"
+EOM
+  if [ "$esonly" = "false" ]; then
+    cat >> start.sh <<- 'EOM'
+nohup ./kibana/bin/kibana > kibana.log 2>&1 &
+echo $! > kibana.pid
+echo "Kibana started (PID: $(cat kibana.pid))"
+EOM
+  fi
+  chmod +x start.sh
+}
+
+# Generate stop.sh for no-container mode
+create_stop_file_no_container() {
+  cat > stop.sh <<- 'EOM'
+#!/bin/sh
+# Stop script for start-local (no-container mode)
+# More information: https://github.com/elastic/start-local
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+if [ -f elasticsearch.pid ]; then
+  kill "$(cat elasticsearch.pid)" 2>/dev/null && echo "Elasticsearch stopped" || true
+  rm -f elasticsearch.pid
+fi
+if [ -f kibana.pid ]; then
+  kill "$(cat kibana.pid)" 2>/dev/null && echo "Kibana stopped" || true
+  rm -f kibana.pid
+fi
+EOM
+  chmod +x stop.sh
+}
+
+# Generate uninstall.sh for no-container mode
+create_uninstall_file_no_container() {
+  cat > uninstall.sh <<- 'EOM'
+#!/bin/sh
+# Uninstall script for start-local (no-container mode)
+# More information: https://github.com/elastic/start-local
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+ask_confirmation() {
+  echo "Do you confirm? (yes/no)"
+  read -r answer
+  case "$answer" in
+    yes|y|Y|Yes|YES) return 0 ;;
+    no|n|N|No|NO)    return 1 ;;
+    *) echo "Please answer yes or no."; ask_confirmation ;;
+  esac
+}
+
+echo "This script will uninstall start-local."
+echo "All data will be deleted and cannot be recovered."
+if ask_confirmation; then
+  cd "${SCRIPT_DIR}"
+  [ -f elasticsearch.pid ] && kill "$(cat elasticsearch.pid)" 2>/dev/null || true
+  [ -f kibana.pid ]        && kill "$(cat kibana.pid)"        2>/dev/null || true
+  cd ..
+  rm -rf "${SCRIPT_DIR}"
+  echo "Start-local successfully removed"
+fi
+EOM
+  chmod +x uninstall.sh
+}
+
+# Main no-container execution path — downloads, configures, and starts ES (+Kibana)
+run_no_container() {
+  if [ "$edot" = "true" ]; then
+    echo "Error: --edot is not supported in no-container mode."
+    exit 1
+  fi
+
+  local_platform="$(no_container_platform)"
+  local_arch="$(no_container_arch)"
+  es_url="https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${es_version}-${local_platform}-${local_arch}.tar.gz"
+  kibana_url="https://artifacts.elastic.co/downloads/kibana/kibana-${es_version}-${local_platform}-${local_arch}.tar.gz"
+
+  echo
+  if [ "$esonly" = "true" ]; then
+    echo "⌛️ Setting up Elasticsearch v${es_version} (no-container mode)..."
+  else
+    echo "⌛️ Setting up Elasticsearch and Kibana v${es_version} (no-container mode)..."
+  fi
+  echo
+  echo "- Generated random passwords"
+  echo "- Created the ${folder_to_clean} folder"
+  echo
+
+  create_env_file
+  create_start_file_no_container
+  create_stop_file_no_container
+  create_uninstall_file_no_container
+
+  check_port_available 9200
+  download_and_extract elasticsearch "$es_url"
+  configure_elasticsearch_no_container
+  start_elasticsearch_no_container
+  wait_for_elasticsearch 120
+
+  if [ "$esonly" = "false" ]; then
+    set_kibana_system_password_no_container
+    check_port_available 5601
+    download_and_extract kibana "$kibana_url"
+    configure_kibana_no_container
+    start_kibana_no_container
+    wait_for_kibana_no_container 180
+  fi
+
+  api_key
+  success
+}
+
+# -------------------------------------------------------
+
 main() {
   parse_args "$@"
   startup
+  detect_runtime
   check_requirements
   check_installation_folder
-  check_docker_services
+  if [ "${runtime:-docker}" != "no-container" ]; then
+    check_docker_services
+  fi
   create_installation_folder
   generate_passwords
   choose_es_version
+
+  if [ "${runtime:-docker}" = "no-container" ]; then
+    run_no_container
+    return
+  fi
+
   create_start_file
   create_stop_file
   create_uninstall_file
@@ -1147,8 +1515,12 @@ main() {
   success
 }
 
-ctrl_c() { 
-  cleanup
+ctrl_c() {
+  if [ "${runtime:-docker}" = "no-container" ]; then
+    cleanup_no_container
+  else
+    cleanup
+  fi
   exit 1
 }
 
