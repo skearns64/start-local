@@ -271,7 +271,7 @@ detect_runtime() {
   if [ "${force_no_container:-false}" = "true" ]; then
     case "$(uname)" in
       Darwin|Linux) ;;
-      *) echo "Error: --no-container mode is only supported on macOS and Linux."; exit 1 ;;
+      *) echo "Error: --no-container mode is only supported on macOS and Linux"; exit 1 ;;
     esac
     runtime="no-container"
     return
@@ -285,7 +285,7 @@ detect_runtime() {
     runtime="no-container"
     case "$(uname)" in
       Darwin|Linux) ;;
-      *) echo "Error: Docker or Podman is required."; exit 1 ;;
+      *) echo "Error: Docker or Podman is required"; exit 1 ;;
     esac
   fi
   set -e
@@ -1170,9 +1170,9 @@ success() {
   echo
 }
 
-# -------------------------------------------------------
-# Native path — no Docker or Podman (macOS and Linux)
-# -------------------------------------------------------
+# --------------------------------------------------------
+# Native path - no Docker or Podman (macOS and Linux)
+# --------------------------------------------------------
 
 # Return the Elastic artifact platform string (darwin or linux)
 no_container_platform() {
@@ -1203,8 +1203,8 @@ check_port_available() {
     ss -tlnp 2>/dev/null | grep -q ":${port} " && in_use=true
   fi
   if [ "$in_use" = "true" ]; then
-    echo "Error: port $port is already in use."
-    echo "Please stop the process using port $port before running start-local."
+    echo "Error: port $port is already in use"
+    echo "Please stop the process using port $port before running start-local"
     exit 1
   fi
 }
@@ -1260,7 +1260,7 @@ start_elasticsearch_no_container() {
 
 # Poll until Elasticsearch responds on port 9200 or timeout
 # parameter: timeout in seconds (default 120)
-wait_for_elasticsearch() {
+wait_for_elasticsearch_no_container() {
   timeout="${1:-120}"
   echo "- Waiting for Elasticsearch to be ready"
   echo
@@ -1269,8 +1269,8 @@ wait_for_elasticsearch() {
       http://localhost:9200 | grep -q '200'; do
     elapsed_time="$(($(date +%s) - start_time))"
     if [ "$elapsed_time" -ge "$timeout" ]; then
-      echo "Error: Elasticsearch timeout of ${timeout} sec."
-      echo "Check elasticsearch.log for details."
+      echo "Error: Elasticsearch timeout of ${timeout} sec"
+      echo "Check elasticsearch.log for details"
       cleanup_no_container
       exit 1
     fi
@@ -1289,7 +1289,7 @@ set_kibana_system_password_no_container() {
       -H "Content-Type: application/json" | grep -q "^{}"; do
     elapsed_time="$(($(date +%s) - start_time))"
     if [ "$elapsed_time" -ge "$timeout" ]; then
-      echo "Error: could not set kibana_system password (timeout)."
+      echo "Error: could not set kibana_system password (timeout)"
       cleanup_no_container
       exit 1
     fi
@@ -1327,8 +1327,8 @@ wait_for_kibana_no_container() {
   until curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'; do
     elapsed_time="$(($(date +%s) - start_time))"
     if [ "$elapsed_time" -ge "$timeout" ]; then
-      echo "Error: Kibana timeout of ${timeout} sec."
-      echo "Check kibana.log for details."
+      echo "Error: Kibana timeout of ${timeout} sec"
+      echo "Check kibana.log for details"
       cleanup_no_container
       exit 1
     fi
@@ -1439,7 +1439,7 @@ EOM
 # Main no-container execution path — downloads, configures, and starts ES (+Kibana)
 run_no_container() {
   if [ "$edot" = "true" ]; then
-    echo "Error: --edot is not supported in no-container mode."
+    echo "Error: --edot is not supported in no-container mode"
     exit 1
   fi
 
@@ -1468,7 +1468,7 @@ run_no_container() {
   download_and_extract elasticsearch "$es_url"
   configure_elasticsearch_no_container
   start_elasticsearch_no_container
-  wait_for_elasticsearch 120
+  wait_for_elasticsearch_no_container 120
 
   if [ "$esonly" = "false" ]; then
     set_kibana_system_password_no_container
@@ -1482,8 +1482,6 @@ run_no_container() {
   api_key
   success
 }
-
-# -------------------------------------------------------
 
 main() {
   parse_args "$@"
